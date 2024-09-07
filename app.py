@@ -2,20 +2,21 @@ from flask import Flask, jsonify, request
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 
-# Connect to PostgreSQL using Vercel environment variables
-POSTGRES_URL = os.environ.get('POSTGRES_URL')
-POSTGRES_USER = os.environ.get('POSTGRES_USER')
-POSTGRES_PASSWORD = os.environ.get('POSTGRES_PASSWORD')
-POSTGRES_DATABASE = os.environ.get('POSTGRES_DATABASE')
+# Parse the DATABASE_URL
+DATABASE_URL = os.environ.get('DATABASE_URL')
+url = urlparse(DATABASE_URL)
 
+# Connect to PostgreSQL using parsed components
 conn = psycopg2.connect(
-    host=os.environ.get('POSTGRES_HOST'),
-    database=POSTGRES_DATABASE,
-    user=POSTGRES_USER,
-    password=POSTGRES_PASSWORD,
+    dbname=url.path[1:],
+    user=url.username,
+    password=url.password,
+    host=url.hostname,
+    port=url.port,
     sslmode='require'
 )
 
