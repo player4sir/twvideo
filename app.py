@@ -1,79 +1,143 @@
-import logging
 from flask import Flask, jsonify, request
 import os
 import psycopg2
-from psycopg2 import OperationalError
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
 
-def fetch_data(cursor, page_size, last_id=None):
-    try:
-        if last_id:
-            cursor.execute(f"SELECT Id, Image_url, Variants FROM media_data WHERE Id > %s ORDER BY Id LIMIT %s;", (last_id, page_size))
-        else:
-            cursor.execute(f"SELECT Id, Image_url, Variants FROM media_data ORDER BY Id LIMIT %s;", (page_size,))
-        
-        rows = cursor.fetchall()
+# Connect to PostgreSQL using Vercel environment variables
+POSTGRES_URL = os.environ.get('POSTGRES_URL')
+POSTGRES_USER = os.environ.get('POSTGRES_USER')
+POSTGRES_PASSWORD = os.environ.get('POSTGRES_PASSWORD')
+POSTGRES_DATABASE = os.environ.get('POSTGRES_DATABASE')
 
-        # 格式化查询结果
-        results = []
-        for row in rows:
-            id, image_url, variants = row
-            result = {
-                "Id": id,
-                "Image_url": image_url,
-                "Variants": variants
-            }
-            results.append(result)
+conn = psycopg2.connect(
+    host=os.environ.get('POSTGRES_HOST'),
+    database=POSTGRES_DATABASE,
+    user=POSTGRES_USER,
+    password=POSTGRES_PASSWORD,
+    sslmode='require'
+)
 
-        return results
-    except OperationalError as e:
-        logging.error("OperationalError: %s", e)
-        return []
-    except Exception as e:
-        logging.error("Error: %s", e)
-        return []
-
-@app.route('/api', methods=['GET'])
-def get_data():
-    try:
-        page_size = int(request.args.get('page_size', 10))
-        page = int(request.args.get('page', 1))
-        # 计算偏移量
-        offset = (page - 1) * page_size
-        # 从环境变量中读取数据库连接信息
-        db_user = os.environ.get('POSTGRES_USER')
-        db_password = os.environ.get('POSTGRES_PASSWORD')
-        db_host = os.environ.get('POSTGRES_HOST')
-        db_port = os.environ.get('POSTGRES_PORT')
-        db_database = os.environ.get('POSTGRES_DATABASE')
-        # 建立数据库连接
-        conn = psycopg2.connect(
-            dbname=db_database,
-            user=db_user,
-            password=db_password,
-            host=db_host,
-            port=db_port
-        )
-        # 创建游标对象
-        cursor = conn.cursor()
-        # 获取数据
-        data = fetch_data(cursor, page_size, offset)
-        # 关闭游标和连接
-        cursor.close()
-        conn.close()
-
-        # 将数据转换为JSON格式并返回
-        return jsonify(data), 200
-
-    except ValueError as e:
-        logging.error("ValueError: %s", e)
-        return jsonify({"error": "Invalid input parameters"}), 400
-    except Exception as e:
-        logging.error("Error: %s", e)
-        return jsonify({"error": "Internal Server Error"}), 500
+# Create table if not exists
 
 
+def create_table():
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS gpts_data (
+                title TEXT PRIMARY KEY,
+                profile_picture TEXT,
+                welcome_message TEXT,
+                description TEXT,
+                prompt_starters TEXT[],
+                system_prompt TEXT
+            )
+        """)
+    conn.commit()
+
+# Load data from PostgreSQL
+
+
+def load_data():
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT * FROM gpts_data")
+        return cur.fetchall()
+
+# Save data to PostgreSQL
+
+
+def save_data(data):
+    create_table()  # Ensure table exists before saving data
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM gpts_data")
+        for item in data:
+            cur.execute("INSERT INTO gpts_data (title, profile_picture, welcome_message, description, prompt_starters, system_prompt) VALUES (%s, %s, %s, %s, %s, %s)",
+                        (item['title'], item['profile_picture'], item['welcome_message'], item['description'], item['prompt_starters'], item['system_prompt']))
+    conn.commit()
+
+# Get all data
+
+
+@app.route('/api/data', methods=['GET'])
+def get_all_data():
+    data = load_data()
+    return jsonify(data)
+
+# Get data by title
+
+
+@app.route('/api/data/<string:title>', methods=['GET'])
+def get_data_by_title(title):
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT * FROM gpts_data WHERE title = %s", (title,))
+        item = cur.fetchone()
+    if item:
+        return jsonify(item)
+    return jsonify({"error": "Item not found"}), 404
+
+# Add new data
+
+
+@app.route('/api/data', methods=['POST'])
+def add_data():
+    new_item = request.json
+    create_table()  # Ensure table exists before adding data
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO gpts_data (title, profile_picture, welcome_message, description, prompt_starters, system_prompt) VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
+                    (new_item['title'], new_item['profile_picture'], new_item['welcome_message'], new_item['description'], new_item['prompt_starters'], new_item['system_prompt']))
+        inserted_item = cur.fetchone()
+    conn.commit()
+    return jsonify(inserted_item), 201
+
+# Update existing data
+
+
+@app.route('/api/data/<string:title>', methods=['PUT'])
+def update_data(title):
+    update_data = request.json
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("UPDATE gpts_data SET profile_picture = %s, welcome_message = %s, description = %s, prompt_starters = %s, system_prompt = %s WHERE title = %s RETURNING *",
+                    (update_data['profile_picture'], update_data['welcome_message'], update_data['description'], update_data['prompt_starters'], update_data['system_prompt'], title))
+        updated_item = cur.fetchone()
+    conn.commit()
+    if updated_item:
+        return jsonify(updated_item)
+    return jsonify({"error": "Item not found"}), 404
+
+# Delete data
+
+
+@app.route('/api/data/<string:title>', methods=['DELETE'])
+def delete_data(title):
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM gpts_data WHERE title = %s RETURNING *", (title,))
+        deleted_item = cur.fetchone()
+    conn.commit()
+    if deleted_item:
+        return jsonify({"message": "Item deleted successfully"})
+    return jsonify({"error": "Item not found"}), 404
+
+# Import data from dt.json
+# @app.route('/api/import', methods=['POST'])
+# def import_data():
+#     try:
+#         with open('dt.json', 'r', encoding='utf-8') as file:
+#             data = json.load(file)
+#         save_data(data)
+#         return jsonify({"message": "Data imported successfully"}), 200
+#     except json.JSONDecodeError as e:
+#         return jsonify({"error": f"Invalid JSON format: {str(e)}"}), 400
+#     except FileNotFoundError:
+#         return jsonify({"error": "dt.json file not found"}), 404
+#     except Exception as e:
+#         return jsonify({"error": f"An error occurred: {str(e)}"}), 500
+
+
+# Create table on startup
+create_table()
+
+# Remove debug mode for production
 if __name__ == '__main__':
-    app.run(debug=False, host='0.0.0.0', port=5000)
+    app.run(debug=False, port=5000)
